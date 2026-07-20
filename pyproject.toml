@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tekstura-core"
+version = "0.1.0"
+description = "Общее ядро ИИ-агентов TeksturaBuro (config, bitrix, dedup, dept_status, stt)"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx",
+  "python-dotenv",
+  "psycopg[binary]",
+]
+
+[tool.setuptools]
+packages = ["tekstura_core"]
