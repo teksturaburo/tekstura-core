@@ -34,4 +34,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "") or "sqlite:///agent.db"
 
 # ── Каналы / операционка ─────────────────────────────────────────────────────
 DMITRY_USER_ID = int(os.getenv("DMITRY_USER_ID", "1"))
+# Диалог эскалации к Дмитрию (строка — id личного чата). Дефолт "1".
+ESCALATION_DIALOG_ID = os.getenv("ESCALATION_DIALOG_ID", "1")
+# Бот «Bitrix24 Support» (техподдержка портала).
+SUPPORT_USER_ID = int(os.getenv("SUPPORT_USER_ID", "4"))
+# Базовый интервал опроса (агенты обычно переопределяют своим <AGENT>_POLL_INTERVAL_SEC).
+POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "15"))
 TZ_NAME = os.getenv("TZ_NAME", "Europe/Belgrade")
