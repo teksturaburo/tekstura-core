@@ -22,8 +22,14 @@ BITRIX_WEBHOOK_BASE = os.environ["BITRIX_WEBHOOK_BASE"].rstrip("/")
 BITRIX_BOT_ID = int(os.getenv("BITRIX_BOT_ID", "0"))
 
 # ── Anthropic ───────────────────────────────────────────────────────────────
-# Только модель по умолчанию; сам ключ агенты читают из env напрямую (свой ключ на агента).
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+# Ключ (свой на агента, из env). Экспонирован в ядро для агентов, читающих config.ANTHROPIC_API_KEY
+# (Milica и generic anthropic_client); агенты со своим config_<agent> могут читать и оттуда.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "1024"))
+# Лимиты хода мозга (универсальные предохранители от runaway/дорогого цикла).
+BRAIN_MAX_TURNS = int(os.getenv("BRAIN_MAX_TURNS", "6"))
+BRAIN_MAX_BUDGET_USD = float(os.getenv("BRAIN_MAX_BUDGET_USD", "1.5"))
 
 # ── Google Gemini (расшифровка голосовых в stt.py, эмбеддинги) ────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
