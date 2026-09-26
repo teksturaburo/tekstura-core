@@ -41,7 +41,8 @@ def init_db() -> None:
             title TEXT, created_at TEXT, relayed TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS message_attempts (
             message_id TEXT PRIMARY KEY, attempts INTEGER, updated_at TEXT)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS brain_spend (day TEXT PRIMARY KEY, usd REAL)""")
+        # DOUBLE PRECISION, а не REAL (v0.3.2): на Postgres REAL — float4 (см. _migrate_float4_columns).
+        c.execute("""CREATE TABLE IF NOT EXISTS brain_spend (day TEXT PRIMARY KEY, usd DOUBLE PRECISION)""")
         c.execute("""CREATE TABLE IF NOT EXISTS budget_alert (day TEXT PRIMARY KEY, sent_at TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS credit_alert (day TEXT PRIMARY KEY, sent_at TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS daily_report_sent (day TEXT PRIMARY KEY, sent_at TEXT)""")
@@ -49,13 +50,14 @@ def init_db() -> None:
         c.execute("""CREATE TABLE IF NOT EXISTS daily_nudge_audit_done (day TEXT PRIMARY KEY, done_at TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS production_sweep_done (day TEXT PRIMARY KEY, done_at TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS task_stage_map (scope TEXT PRIMARY KEY, data TEXT, updated_at TEXT)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS sweep_last_run (name TEXT PRIMARY KEY, ts REAL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS sweep_last_run (name TEXT PRIMARY KEY, ts DOUBLE PRECISION)""")
         c.execute("""CREATE TABLE IF NOT EXISTS email_drafts (
             draft_id TEXT PRIMARY KEY, to_email TEXT, subject TEXT, body TEXT,
             created_at TEXT, sent_at TEXT, approved_at TEXT, approved_by TEXT)""")
         if not _IS_PG:
             c.commit()
     _migrate_email_draft_columns()
+    _migrate_float4_columns()
 
 
 def _migrate_email_draft_columns() -> None:
@@ -70,6 +72,49 @@ def _migrate_email_draft_columns() -> None:
                     c.commit()
         except Exception:  # noqa: BLE001 — колонка уже есть (sqlite/pg) → миграция не нужна
             pass
+
+
+#: Колонки, созданные до v0.3.2 как REAL. На Postgres REAL — float4: 24 бита мантиссы, и эпоха
+#: ~1,79e9 хранится с шагом 128 с (1790451334 → 1790451328). `claim_interval` сравнивал с
+#: округлённым временем — каждый интервальный гейт плавал на ±64 с: 2-секундный гейт бывал
+#: закрыт до ~66 с, 120-секундный inflight-лок жил 56–184 с (аудит Иваны 26.09.2026, №1).
+#: На SQLite REAL — 8 байт, поэтому тесты этого не видели.
+_FLOAT4_COLUMNS = (("sweep_last_run", "ts"), ("brain_spend", "usd"))
+
+#: Сколько ALTER ждёт лок таблицы. ALTER TYPE берёт ACCESS EXCLUSIVE: без предела он встал бы
+#: в очередь за транзакцией соседнего контейнера (деплой-оверлап) и запер бы за собой все
+#: claim_interval обоих. Не дождался — пропускаем, повтор на следующем старте.
+FLOAT4_MIGRATION_LOCK_TIMEOUT = "5s"
+
+
+def _migrate_float4_columns() -> list[str]:
+    """Postgres: REAL (float4) → DOUBLE PRECISION у колонок времени и денег. Идемпотентно.
+
+    Каждая колонка — в своей транзакции, с lock_timeout. Сбой (лок не взят, нет прав) не роняет
+    старт: печать в лог и повтор на следующем init_db. float4 → float8 переводится точно, но уже
+    округлённые значения остаются как есть до следующей записи — гейт, записанный «в будущее»
+    (до +64 с), один раз подождёт лишнего. Возвращает список переведённых колонок (для тестов).
+    """
+    if not _IS_PG:
+        return []
+    done = []
+    for table, col in _FLOAT4_COLUMNS:
+        try:
+            with _conn() as c:
+                row = c.execute(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+                    (table, col)).fetchone()
+                if not row or row[0] != "real":
+                    continue
+                c.execute(f"SET LOCAL lock_timeout = '{FLOAT4_MIGRATION_LOCK_TIMEOUT}'")
+                c.execute(f"ALTER TABLE {table} ALTER COLUMN {col} TYPE DOUBLE PRECISION")
+            done.append(f"{table}.{col}")
+            print(f"[core][dedup] {table}.{col}: REAL (float4) → DOUBLE PRECISION", flush=True)
+        except Exception as exc:  # noqa: BLE001 — не роняем старт агента, повтор на следующем
+            print(f"[core][dedup] {table}.{col}: перевод в DOUBLE PRECISION не удался "
+                  f"({type(exc).__name__}: {exc}) — повтор на следующем старте", flush=True)
+    return done
 
 
 def attempt_info(message_id: str) -> tuple[int, str | None]:
