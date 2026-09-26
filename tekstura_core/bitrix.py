@@ -62,6 +62,17 @@ _LIMITER = _Limiter(config.BITRIX_MIN_INTERVAL_SEC)
 _tls = threading.local()
 
 
+def set_min_interval_for_tests(seconds: float) -> None:
+    """ТОЛЬКО ДЛЯ ТЕСТОВ: заменить лимитер процесса на лимитер с шагом `seconds`.
+
+    Боевой шаг — `config.BITRIX_MIN_INTERVAL_SEC`, и из env он ниже 0,5 с не опускается. Быстрый
+    шаг тестам нужен, чтобы прогон занимал секунды; ставится он только этим вызовом — отдельным
+    и заметным в коде, а не тем же env, который читает прод.
+    """
+    global _LIMITER
+    _LIMITER = _Limiter(max(0.0, float(seconds)))
+
+
 @contextmanager
 def priority():
     """Все вызовы портала внутри блока (в ЭТОМ потоке) идут приоритетной полосой лимитера."""

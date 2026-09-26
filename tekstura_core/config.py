@@ -21,8 +21,14 @@ BITRIX_WEBHOOK_BASE = os.environ["BITRIX_WEBHOOK_BASE"].rstrip("/")
 # ID бот-аккаунта агента. Дефолт 0 (нейтральный) — каждый агент задаёт свой через env.
 BITRIX_BOT_ID = int(os.getenv("BITRIX_BOT_ID", "0"))
 # Шаг между СТАРТАМИ запросов процесса к порталу (лимит ~2 запроса/с). До v0.3.1 была пауза
-# 0,4 с от КОНЦА ответа без лока — см. `bitrix._Limiter`. Пол 0,05 с: ноль в env снял бы лимит.
-BITRIX_MIN_INTERVAL_SEC = max(0.05, float(os.getenv("BITRIX_MIN_INTERVAL_SEC", "0.5")))
+# 0,4 с от КОНЦА ответа без лока — см. `bitrix._Limiter`.
+# Пол — 0,5 с, то есть не быстрее 2 запросов/с: env может шаг только УВЕЛИЧИТЬ (запас под соседей
+# по порталу). Первая версия v0.3.1 держала пол 0,05 с, и значение из тестов (0,1), скопированное
+# в прод, разогнало бы процесс до 10 запросов/с (ревью Codex 26.09.2026). Тестам быстрый шаг
+# ставится отдельным явным вызовом `bitrix.set_min_interval_for_tests`, не через этот env.
+BITRIX_MIN_INTERVAL_FLOOR_SEC = 0.5
+BITRIX_MIN_INTERVAL_SEC = max(BITRIX_MIN_INTERVAL_FLOOR_SEC,
+                              float(os.getenv("BITRIX_MIN_INTERVAL_SEC", "0.5")))
 
 # ── Anthropic ───────────────────────────────────────────────────────────────
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")

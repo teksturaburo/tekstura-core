@@ -11,7 +11,9 @@ import pytest
 
 from tekstura_core import bitrix, config
 
-INTERVAL = float(getattr(config, "BITRIX_MIN_INTERVAL_SEC", 0.4))
+#: Шаг тестового лимитера (conftest ставит его явным `set_min_interval_for_tests`). Боевой шаг
+#: из config здесь не берём: он не ниже 0,5 с, и прогон растянулся бы впятеро.
+INTERVAL = 0.1
 EPS = 0.01          # запас на гранулярность часов, а не на поведение
 
 
@@ -148,12 +150,68 @@ def test_throttle_shares_the_budget_with_calls(portal):
     assert min(_gaps(all_starts)) >= INTERVAL - EPS
 
 
-def test_zero_interval_in_env_does_not_remove_the_limit(monkeypatch):
+def test_env_cannot_push_the_interval_below_the_portal_floor(monkeypatch):
+    """Пол 0,5 с держится на любом значении env: 0, тестовые 0,1, отрицательное."""
     import importlib
-    monkeypatch.setenv("BITRIX_MIN_INTERVAL_SEC", "0")
-    fresh = importlib.reload(config)
     try:
-        assert fresh.BITRIX_MIN_INTERVAL_SEC >= 0.05
+        for raw in ("0", "0.1", "0.49", "-1"):
+            monkeypatch.setenv("BITRIX_MIN_INTERVAL_SEC", raw)
+            fresh = importlib.reload(config)
+            assert fresh.BITRIX_MIN_INTERVAL_SEC >= 0.5, raw
+        monkeypatch.setenv("BITRIX_MIN_INTERVAL_SEC", "0.8")
+        assert importlib.reload(config).BITRIX_MIN_INTERVAL_SEC == 0.8   # вверх — можно
     finally:
-        monkeypatch.setenv("BITRIX_MIN_INTERVAL_SEC", "0.1")
+        monkeypatch.delenv("BITRIX_MIN_INTERVAL_SEC", raising=False)
         importlib.reload(config)
+
+
+_PROD_PROBE = r"""
+import json, os, time
+os.environ["BITRIX_MIN_INTERVAL_SEC"] = "0.1"      # значение из тестов, скопированное в прод
+from tekstura_core import bitrix
+starts = []
+
+class R:
+    def json(self):
+        return {"result": True}
+
+def post(url, json=None, timeout=None):
+    starts.append(time.monotonic())
+    return R()
+
+bitrix.httpx.post = post
+for _ in range(5):
+    bitrix.call("crm.deal.get", {})
+print(json.dumps({"interval": bitrix._LIMITER.interval, "starts": starts}))
+"""
+
+
+def test_fresh_process_is_never_faster_than_two_requests_a_second():
+    """Боевой путь целиком: свежий процесс, env 0,1 — а портал всё равно получает ≤ 2 запроса/с.
+
+    Отдельный процесс, потому что лимитер собирается на импорте, а в этом процессе conftest уже
+    поставил тестовый шаг.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ, BITRIX_WEBHOOK_BASE="https://example.invalid/rest/0/test",
+               DATABASE_URL="sqlite:////tmp/tekstura-core-test-bootstrap.sqlite3")
+    env.pop("BITRIX_MIN_INTERVAL_SEC", None)
+    out = subprocess.run([sys.executable, "-c", _PROD_PROBE], env=env, capture_output=True,
+                         text=True, timeout=60, cwd=os.path.dirname(os.path.dirname(__file__)))
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout.strip().splitlines()[-1])
+    assert got["interval"] >= 0.5
+    starts = got["starts"]
+    assert len(starts) == 5
+    assert min(_gaps(starts)) >= 0.5 - EPS
+    rate = (len(starts) - 1) / (starts[-1] - starts[0])
+    assert rate <= 2.0 + 0.05, f"{rate:.2f} запроса/с"
+
+
+def test_test_hook_is_the_only_way_below_the_floor():
+    """Быстрый шаг тестов ставится явным вызовом и именно в лимитер, а не в config."""
+    assert bitrix._LIMITER.interval < 0.5            # conftest: set_min_interval_for_tests(0.1)
+    assert config.BITRIX_MIN_INTERVAL_SEC >= 0.5     # config при этом боевой
