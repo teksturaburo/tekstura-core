@@ -69,7 +69,9 @@ def _freeze(monkeypatch, ts):
     monkeypatch.setattr(dedup, "datetime", Frozen)
 
 
-def test_fresh_schema_is_double_precision(pg):
+def test_fresh_schema_is_double_precision(pg, monkeypatch):
+    # Миграция выключена: иначе она маскировала бы откат CREATE обратно на REAL (мутант ревью 26.09).
+    monkeypatch.setattr(dedup, "_migrate_float4_columns", lambda: [])
     dedup.init_db()
     assert _types(pg) == {"sweep_last_run.ts": "double precision",
                           "brain_spend.usd": "double precision"}
@@ -115,7 +117,7 @@ def test_claim_interval_on_float4_reproduces_the_defect(pg, monkeypatch):
     assert dedup.claim_interval("lock120", 120) is True    # дефект: гейт открылся через 58 с
 
 
-def test_migration_does_not_hang_on_locked_table(pg, monkeypatch):
+def test_migration_does_not_hang_on_locked_table(pg, monkeypatch, capsys):
     """Соседний контейнер держит транзакцию на таблице: старт не виснет и не падает."""
     with _raw(pg) as c:
         c.execute("CREATE TABLE sweep_last_run (name TEXT PRIMARY KEY, ts REAL)")
@@ -135,6 +137,8 @@ def test_migration_does_not_hang_on_locked_table(pg, monkeypatch):
     types = _types(pg)
     assert types["sweep_last_run.ts"] == "real"             # не взял лок — оставил на следующий старт
     assert types["brain_spend.usd"] == "double precision"   # соседняя колонка переведена
+    out = capsys.readouterr().out
+    assert "sweep_last_run.ts: перевод в DOUBLE PRECISION не удался (LockNotAvailable" in out, out
     assert dedup._migrate_float4_columns() == ["sweep_last_run.ts"]   # следующий старт доводит
 
 
@@ -153,7 +157,17 @@ def test_claims_wait_no_longer_than_lock_timeout(pg, monkeypatch):
     try:
         alter = threading.Thread(target=lambda: migrated.extend(dedup._migrate_float4_columns()))
         alter.start()
-        time.sleep(0.3)                      # ALTER уже в очереди за локом
+        # Ждём, пока ALTER РЕАЛЬНО встанет в очередь за локом: sleep пропускал случай, когда поток
+        # ALTER запаздывал, и тест проходил без очереди вовсе (мутант ревью 26.09).
+        deadline = time.monotonic() + 5
+        with _raw(pg) as mon:
+            while time.monotonic() < deadline:
+                if mon.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                               "AND query LIKE 'ALTER TABLE sweep_last_run%%'").fetchone()[0]:
+                    break
+                time.sleep(0.02)
+            else:
+                pytest.fail("ALTER так и не встал в очередь за локом")
         t = time.monotonic()
         gate = threading.Thread(target=lambda: claimed.append(dedup.claim_interval("x", 1)))
         gate.start()
@@ -164,5 +178,21 @@ def test_claims_wait_no_longer_than_lock_timeout(pg, monkeypatch):
         holder.execute("ROLLBACK")
         holder.close()
     assert claimed == [True]
-    assert waited < 3, waited                # ждал ALTER'а (~0,7 с), а не соседа
+    assert 0.2 < waited < 3, waited          # стоял в очереди за ALTER'ом, но не за соседом
     assert "sweep_last_run.ts" not in migrated
+
+
+def test_only_real_columns_are_migrated(pg):
+    """Одна колонка уже double — переводится только вторая (мутант ревью: continue → break)."""
+    with _raw(pg) as c:
+        c.execute("CREATE TABLE sweep_last_run (name TEXT PRIMARY KEY, ts DOUBLE PRECISION)")
+        c.execute("CREATE TABLE brain_spend (day TEXT PRIMARY KEY, usd REAL)")
+    assert dedup._migrate_float4_columns() == ["brain_spend.usd"]
+
+
+def test_missing_column_is_logged_not_raised(pg, capsys):
+    """Таблиц нет в текущей схеме — не падаем, но и не молчим."""
+    assert dedup._migrate_float4_columns() == []
+    out = capsys.readouterr().out
+    assert "sweep_last_run.ts: колонки нет в текущей схеме" in out, out
+    assert "brain_spend.usd: колонки нет в текущей схеме" in out, out

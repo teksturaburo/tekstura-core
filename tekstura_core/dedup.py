@@ -92,8 +92,10 @@ def _migrate_float4_columns() -> list[str]:
 
     Каждая колонка — в своей транзакции, с lock_timeout. Сбой (лок не взят, нет прав) не роняет
     старт: печать в лог и повтор на следующем init_db. float4 → float8 переводится точно, но уже
-    округлённые значения остаются как есть до следующей записи — гейт, записанный «в будущее»
-    (до +64 с), один раз подождёт лишнего. Возвращает список переведённых колонок (для тестов).
+    округлённые значения остаются как есть до следующей записи, и каждый гейт один раз ведёт себя
+    по-старому: записанный «в будущее» подождёт лишнего до 64 с, записанный «в прошлое» откроется
+    раньше до 63 с (120-секундный inflight — через 57 с). На v0.3.1 так было при КАЖДОЙ записи.
+    Возвращает список переведённых колонок (для тестов).
     """
     if not _IS_PG:
         return []
@@ -105,7 +107,11 @@ def _migrate_float4_columns() -> list[str]:
                     "SELECT data_type FROM information_schema.columns "
                     "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
                     (table, col)).fetchone()
-                if not row or row[0] != "real":
+                if not row:
+                    print(f"[core][dedup] {table}.{col}: колонки нет в текущей схеме — перевод "
+                          f"не нужен или схема чужая", flush=True)
+                    continue
+                if row[0] != "real":
                     continue
                 c.execute(f"SET LOCAL lock_timeout = '{FLOAT4_MIGRATION_LOCK_TIMEOUT}'")
                 c.execute(f"ALTER TABLE {table} ALTER COLUMN {col} TYPE DOUBLE PRECISION")

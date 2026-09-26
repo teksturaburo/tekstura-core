@@ -29,3 +29,7 @@ tekstura-core @ git+https://github.com/teksturaburo/tekstura-core@v0.1.0
 semver-теги. Ритуал: правка ядра → тег `vX.Y.Z` → бамп пина в агент-репо → push (деплоит только этого агента). Изоляция = фича: плохой релиз ядра доедет до агента только при бампе пина.
 
 Тесты ядра: `python3 -m pytest -q tests` (лимитер портала и атомарный `bump_attempt`).
+
+**Перед тегом — ещё и на настоящем Postgres** (с v0.3.2): `TEST_PG_URL=postgresql://…/<пустая БД> python3 -m pytest -q tests`. Без `TEST_PG_URL` PG-тесты пропускаются (`skipped`), а на SQLite не видно
+целого класса дефектов: `REAL` там 8 байт, на Postgres — float4 (v0.3.2), голый `%` в SQL с параметрами
+psycopg принимает за плейсхолдер. Локальный Postgres без Docker: `pip install pgserver` (Python ≤ 3.12).
