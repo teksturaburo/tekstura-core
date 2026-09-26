@@ -40,6 +40,27 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ── БД (dedup / dept_status): Postgres на Railway, sqlite локально ────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "") or "sqlite:///agent.db"
+# Таймауты Postgres (v0.3.1). До них соединение ядра не имело ни таймаута запроса, ни keepalive:
+# зависший Postgres (или оборванная сеть без RST) держал вызывающий поток бесконечно. Для агента
+# с потоком-слушателем (Ivana, 26.09.2026) это значит «поток держит единственного исполнителя
+# кликов, кнопки не разбирает никто». Таймаут запроса — на сервере (statement_timeout, включает
+# ожидание блокировок), обрыв сети ловят keepalive и tcp_user_timeout. 0 в
+# DB_STATEMENT_TIMEOUT_MS снимает лимит запроса (не рекомендуется).
+DB_CONNECT_TIMEOUT_SEC = max(1, int(os.getenv("DB_CONNECT_TIMEOUT_SEC", "10")))
+DB_STATEMENT_TIMEOUT_MS = max(0, int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "30000")))
+
+
+def pg_connect_kwargs() -> dict:
+    """Параметры `psycopg.connect` для всех соединений ядра: таймауты и keepalive.
+
+    keepalive: простой 30 с → пробы раз в 10 с → 3 пробы, то есть мёртвый сервер виден за ~60 с,
+    а не за системные 2 часа. tcp_user_timeout 60 с — предел для неподтверждённых данных (Linux).
+    """
+    kw = {"connect_timeout": DB_CONNECT_TIMEOUT_SEC, "keepalives": 1, "keepalives_idle": 30,
+          "keepalives_interval": 10, "keepalives_count": 3, "tcp_user_timeout": 60000}
+    if DB_STATEMENT_TIMEOUT_MS:
+        kw["options"] = f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS}"
+    return kw
 
 # ── Каналы / операционка ─────────────────────────────────────────────────────
 DMITRY_USER_ID = int(os.getenv("DMITRY_USER_ID", "1"))

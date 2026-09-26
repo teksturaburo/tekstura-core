@@ -9,10 +9,15 @@ from . import config
 
 _IS_PG = config.DATABASE_URL.startswith("postgres")
 
-if _IS_PG:
+def _pg_connect(url: str):
+    """Соединение Postgres с таймаутами ядра (v0.3.1): запрос и сеть не висят бесконечно."""
     import psycopg
+    return psycopg.connect(url, **config.pg_connect_kwargs())
+
+
+if _IS_PG:
     def _conn():
-        return psycopg.connect(config.DATABASE_URL)
+        return _pg_connect(config.DATABASE_URL)
     _PH = "%s"
 else:
     _PATH = config.DATABASE_URL.replace("sqlite:///", "")

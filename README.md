@@ -8,7 +8,7 @@
 |---|---|
 | `config` | Универсальные env-значения (Bitrix/Anthropic-модель/Gemini/БД/TZ). Агент-специфика — в `config_<agent>.py` агента, НЕ здесь. |
 | `bitrix` | Клиент Bitrix24 REST (входящий вебхук бота). С v0.3.1 — один потокобезопасный лимитер на процесс: шаг между СТАРТАМИ запросов `BITRIX_MIN_INTERVAL_SEC` (0,5 с), `bitrix.priority()` — приоритетная полоса потока, `bitrix.throttle()` — слот для запросов мимо `call_with`. |
-| `dedup` | Дедуп сообщений + вспом. таблицы состояния (Postgres/sqlite по `DATABASE_URL`). |
+| `dedup` | Дедуп сообщений + вспом. таблицы состояния (Postgres/sqlite по `DATABASE_URL`). С v0.3.1 соединения Postgres (и в `dept_status`) идут с таймаутами: `DB_CONNECT_TIMEOUT_SEC` (10), `DB_STATEMENT_TIMEOUT_MS` (30 000), keepalive — `config.pg_connect_kwargs()`. |
 | `dept_status` | Клиент штаб-БД отдела (`DEPT_STATUS_DATABASE_URL` → общий Postgres). |
 | `stt` | Расшифровка голосовых через Gemini. |
 

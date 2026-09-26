@@ -47,7 +47,8 @@ def _connect():
     url = _db_url()
     if url.startswith("postgres"):
         import psycopg  # ленивый импорт: локально/в тестах psycopg может отсутствовать
-        return psycopg.connect(url), "%s"
+        # Таймауты ядра (v0.3.1): зависший Postgres не держит вызывающего бесконечно.
+        return psycopg.connect(url, **config.pg_connect_kwargs()), "%s"
     return sqlite3.connect(url.replace("sqlite:///", "")), "?"
 
 
