@@ -77,17 +77,22 @@ def attempt_info(message_id: str) -> tuple[int, str | None]:
 
 
 def bump_attempt(message_id: str) -> int:
-    """Увеличить счётчик попыток обработки сообщения, вернуть новое значение."""
+    """Увеличить счётчик попыток обработки сообщения, вернуть новое значение.
+
+    АТОМАРНО (v0.3.1): один UPSERT … RETURNING. До этого — SELECT, потом UPDATE или INSERT без
+    ON CONFLICT: при одновременном инкременте одного ключа (второй поток агента, деплой-оверлап
+    двух контейнеров) одно обновление терялось, а INSERT второго падал UniqueViolation. У Иваны
+    так занижались счётчики суточной сводки — исключение глоталось вызывающим.
+    """
     now = datetime.now(timezone.utc).isoformat()
     with _conn() as c:
-        cur = c.execute(f"SELECT attempts FROM message_attempts WHERE message_id={_PH}", (str(message_id),))
-        row = cur.fetchone()
-        n = (row[0] if row else 0) + 1
-        if row:
-            c.execute(f"UPDATE message_attempts SET attempts={_PH}, updated_at={_PH} WHERE message_id={_PH}",
-                      (n, now, str(message_id)))
-        else:
-            c.execute(f"INSERT INTO message_attempts VALUES ({_PH},{_PH},{_PH})", (str(message_id), n, now))
+        cur = c.execute(
+            f"INSERT INTO message_attempts (message_id, attempts, updated_at) VALUES ({_PH}, 1, {_PH}) "
+            f"ON CONFLICT (message_id) DO UPDATE SET "
+            f"attempts = COALESCE(message_attempts.attempts, 0) + 1, updated_at = excluded.updated_at "
+            f"RETURNING attempts",
+            (str(message_id), now))
+        n = int(cur.fetchone()[0])
         if not _IS_PG:
             c.commit()
         return n

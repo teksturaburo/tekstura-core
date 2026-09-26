@@ -2,14 +2,81 @@
 
 Подводные камни (см. волт _Обзор-автоматизаций):
 - ошибки приходят с HTTP 200 + {"error": ...} — всегда проверяем;
-- rate limit ~2 req/sec → пауза 0.4с между вызовами.
+- rate limit ~2 req/sec → один лимитер на процесс, шаг между СТАРТАМИ запросов
+  `config.BITRIX_MIN_INTERVAL_SEC` (0.5 с по умолчанию), см. `_Limiter`.
 """
 import re
+import threading
 import time
+from contextlib import contextmanager
+
 import httpx
 from . import config
 
-_last_call = 0.0
+
+class _Limiter:
+    """Один лимитер портала на процесс: слот — момент СТАРТА запроса, сон — вне лока.
+
+    До v0.3.1 здесь был глобальный `_last_call` без лока, а пауза 0,4 с отсчитывалась от КОНЦА
+    предыдущего ответа. В одном потоке это давало фактически ~1,1–1,4 запроса/с. С двумя
+    потоками — гонка: оба видят «прошло ≥0,4 с» и стреляют разом. Офлайн-симуляция 26.09.2026
+    (2 потока × 5 вызовов, задержка портала 0,5 с): 5 интервалов из 9 ≈ 0 с — темп до ~2×,
+    портал отвечает QUERY_LIMIT_EXCEEDED, и ретраи съедают весь выигрыш второго потока.
+
+    Почему от старта, а не от конца: лимит портала считает запросы, пришедшие в секунду, а не
+    паузы между ответами. Интервал 0,5 с от старта — ровно 2 запроса/с при любой задержке сети.
+    (0,4 с от старта дали бы до 2,5/с — выше лимита.)
+
+    Приоритет. Поток, взявший `priority()`, получает освободившийся слот раньше обычных, даже
+    если те ждали дольше: клик человека не должен стоять в общей очереди за свипом. Цена —
+    обычные могут ждать, пока приоритетные идут подряд; поэтому приоритет берут только короткие
+    обработчики. Лок листовой: под ним нет ни вызовов, ни сна — `Condition.wait` его отпускает.
+    """
+
+    def __init__(self, interval: float):
+        self.interval = float(interval)
+        self._cond = threading.Condition(threading.Lock())
+        self._next = 0.0                    # monotonic: самый ранний старт следующего запроса
+        self._waiting = {True: 0, False: 0}  # сколько ждут слота: приоритетные / обычные
+
+    def acquire(self, high: bool = False) -> float:
+        """Дождаться своего слота и занять его. Возврат — момент старта (monotonic)."""
+        high = bool(high)
+        with self._cond:
+            self._waiting[high] += 1
+            try:
+                while True:
+                    now = time.monotonic()
+                    if now >= self._next and (high or not self._waiting[True]):
+                        self._next = now + self.interval
+                        return now
+                    # Слот ещё не наступил — ждём ровно до него. Слот наступил, но его ждёт
+                    # приоритетный — ждём, пока он уйдёт (он разбудит всех на выходе).
+                    self._cond.wait(self._next - now if now < self._next else None)
+            finally:
+                self._waiting[high] -= 1
+                self._cond.notify_all()
+
+
+_LIMITER = _Limiter(config.BITRIX_MIN_INTERVAL_SEC)
+_tls = threading.local()
+
+
+@contextmanager
+def priority():
+    """Все вызовы портала внутри блока (в ЭТОМ потоке) идут приоритетной полосой лимитера."""
+    prev = getattr(_tls, "high", False)
+    _tls.high = True
+    try:
+        yield
+    finally:
+        _tls.high = prev
+
+
+def throttle() -> float:
+    """Занять слот лимитера портала, не делая запроса. Для тех, кто ходит в портал мимо
+    `call_with` (скачивание файлов, свой httpx) — чтобы их запросы тоже считались."""
+    return _LIMITER.acquire(getattr(_tls, "high", False))
 
 
 def _safe_client_filename(filename: str, default: str = "Ponuda") -> str:
@@ -23,15 +90,11 @@ def _safe_client_filename(filename: str, default: str = "Ponuda") -> str:
 def call_with(base: str, method: str, params: dict | None = None) -> dict:
     """Вызвать REST под ПРОИЗВОЛЬНЫМ вебхуком (напр. хук Канта 2206 для КБ-группы — там Кант участник,
     а Milica нет). Бросает RuntimeError, если Bitrix вернул {"error"}."""
-    global _last_call
-    delta = time.monotonic() - _last_call
-    if delta < 0.4:                      # rate limit ~2 req/sec
-        time.sleep(0.4 - delta)
+    throttle()                           # rate limit ~2 req/sec на процесс, см. _Limiter
     url = f"{base.rstrip('/')}/{method}.json"
     # JSON-тело: корректно кодирует вложенные структуры (filter/select/order),
     # form-data их ломает («Should be value of type array»).
     resp = httpx.post(url, json=params or {}, timeout=30)
-    _last_call = time.monotonic()
     data = resp.json()
     if isinstance(data, dict) and data.get("error"):
         raise RuntimeError(f"Bitrix {method}: {data.get('error')} {data.get('error_description','')}")
@@ -267,6 +330,7 @@ def download_file(file_id) -> tuple[str, bytes]:
     url = res.get("DOWNLOAD_URL")
     if not url:
         return name, b""
+    throttle()          # скачивание — тоже запрос к порталу, считается в общий лимит
     resp = httpx.get(url, timeout=60, follow_redirects=True)
     resp.raise_for_status()
     return name, resp.content

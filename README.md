@@ -7,7 +7,7 @@
 | Модуль | Что |
 |---|---|
 | `config` | Универсальные env-значения (Bitrix/Anthropic-модель/Gemini/БД/TZ). Агент-специфика — в `config_<agent>.py` агента, НЕ здесь. |
-| `bitrix` | Клиент Bitrix24 REST (входящий вебхук бота). |
+| `bitrix` | Клиент Bitrix24 REST (входящий вебхук бота). С v0.3.1 — один потокобезопасный лимитер на процесс: шаг между СТАРТАМИ запросов `BITRIX_MIN_INTERVAL_SEC` (0,5 с), `bitrix.priority()` — приоритетная полоса потока, `bitrix.throttle()` — слот для запросов мимо `call_with`. |
 | `dedup` | Дедуп сообщений + вспом. таблицы состояния (Postgres/sqlite по `DATABASE_URL`). |
 | `dept_status` | Клиент штаб-БД отдела (`DEPT_STATUS_DATABASE_URL` → общий Postgres). |
 | `stt` | Расшифровка голосовых через Gemini. |
@@ -27,3 +27,5 @@ tekstura-core @ git+https://github.com/teksturaburo/tekstura-core@v0.1.0
 ## Версии
 
 semver-теги. Ритуал: правка ядра → тег `vX.Y.Z` → бамп пина в агент-репо → push (деплоит только этого агента). Изоляция = фича: плохой релиз ядра доедет до агента только при бампе пина.
+
+Тесты ядра: `python3 -m pytest -q tests` (лимитер портала и атомарный `bump_attempt`).
