@@ -1,0 +1,50 @@
+name: tests
+
+# Ядро гоняется на SQLite и на НАСТОЯЩЕМ Postgres 18 (как у агентов в проде). До v0.3.2 CI не было
+# вовсе, а SQLite не видит целый класс: REAL там 8 байт, на Postgres — float4 (гейты плавали на
+# ±64 с, аудит 26.09.2026), голый % в SQL с параметрами psycopg принимает за плейсхолдер.
+# PG-тесты сами заводят и сносят свою схему; без TEST_PG_URL они пропускаются — здесь он задан всегда.
+
+on:
+  push:
+    branches: ["main", "claude/**", "feat/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_PG_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Поставить ядро и pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest
+
+      - name: Прогнать тесты (SQLite + Postgres), пропусков быть не должно
+        run: |
+          set -o pipefail   # без него красный pytest за tee дал бы зелёный шаг
+          python -m pytest -q -rs | tee pytest.out
+          if grep -q "skipped" pytest.out; then echo "::error::PG-тесты пропущены — TEST_PG_URL не дошёл"; exit 1; fi
